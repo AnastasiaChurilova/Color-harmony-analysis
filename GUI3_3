@@ -1,0 +1,893 @@
+# -*- coding: utf-8 -*-
+"""
+GUI для анализа колористической гармонии
+Гибридный подход: нейросеть + классические методы цветового круга
+"""
+
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+from PIL import Image, ImageTk
+import numpy as np
+import tensorflow as tf
+from keras.models import load_model
+from keras.preprocessing.image import img_to_array
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from sklearn.cluster import KMeans
+import pickle
+import os
+import threading
+
+# Настройка русских шрифтов для matplotlib
+plt.rcParams['font.sans-serif'] = ['Arial', 'DejaVu Sans', 'Microsoft Sans Serif']
+plt.rcParams['axes.unicode_minus'] = False
+
+
+class ColorHarmonyApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Анализ колористической гармонии")
+        self.root.geometry("1400x800")
+        self.root.configure(bg='#2c3e50')
+        
+        # Загрузка модели и энкодеров
+        self.load_model_and_encoders()
+        
+        # Переменные
+        self.current_image_path = None
+        self.current_image = None
+        self.current_image_original = None
+        self.analysis_result = None
+        
+        # Создание интерфейса
+        self.create_widgets()
+        
+    def load_model_and_encoders(self):
+        """Загрузка обученной модели и энкодеров"""
+        try:
+            # Загрузка модели
+            model_path = "color_harmony_model_final.keras"
+            if not os.path.exists(model_path):
+                model_path = "best_color_harmony_model.keras"
+            
+            self.model = load_model(model_path)
+            print("✅ Модель загружена")
+            
+            # Загрузка энкодеров
+            with open('label_encoders.pkl', 'rb') as f:
+                encoders = pickle.load(f)
+                self.color_encoder = encoders['color_class']
+                self.balance_encoder = encoders['balance_class']
+            
+            print(f"✅ Энкодеры загружены: {len(self.color_encoder.classes_)} цветовых классов")
+            
+        except Exception as e:
+            print(f"❌ Ошибка загрузки: {e}")
+            messagebox.showerror("Ошибка", f"Не удалось загрузить модель:\n{e}")
+            self.root.quit()
+    
+    def create_widgets(self):
+        """Создание виджетов интерфейса"""
+        
+        # Главный фрейм
+        main_frame = tk.Frame(self.root, bg='#2c3e50')
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        
+        # Верхняя панель с кнопками
+        top_frame = tk.Frame(main_frame, bg='#34495e', height=60)
+        top_frame.pack(fill=tk.X, pady=(0, 10))
+        top_frame.pack_propagate(False)
+        
+        # Заголовок
+        title_label = tk.Label(
+            top_frame, 
+            text="🎨 Анализ колористической гармонии", 
+            font=('Arial', 16, 'bold'),
+            bg='#34495e',
+            fg='white'
+        )
+        title_label.pack(side=tk.LEFT, padx=16, pady=15)
+        
+        # Кнопки
+        btn_frame = tk.Frame(top_frame, bg='#34495e')
+        btn_frame.pack(side=tk.RIGHT, padx=18)
+        
+        self.load_btn = tk.Button(
+            btn_frame,
+            text="📁 Загрузить изображение",
+            font=('Arial', 12),
+            bg='#27ae60',
+            fg='white',
+            padx=15,
+            pady=6,
+            cursor='hand2',
+            command=self.load_image
+        )
+        self.load_btn.pack(side=tk.LEFT, padx=5)
+        
+        self.analyze_btn = tk.Button(
+            btn_frame,
+            text="🔍 Анализировать",
+            font=('Arial', 12),
+            bg='#2980b9',
+            fg='white',
+            padx=15,
+            pady=6,
+            cursor='hand2',
+            state='disabled',
+            command=self.analyze_image
+        )
+        self.analyze_btn.pack(side=tk.LEFT, padx=5)
+        
+        # Основная область - разделена на 2 колонки
+        content_frame = tk.Frame(main_frame, bg='#2c3e50')
+        content_frame.pack(fill=tk.BOTH, expand=True)
+        
+        # Левая панель - изображение 
+        left_panel = tk.Frame(content_frame, bg='#34495e', relief=tk.RAISED, bd=1)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=0)
+        
+        self.image_label = tk.Label(
+            left_panel,
+            text="Загрузите изображение",
+            font=('Arial', 14),
+            bg='#34495e',
+            fg='#95a5a6'
+        )
+        self.image_label.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+        
+        # Правая панель 
+        right_panel = tk.Frame(content_frame, bg='#34495e', relief=tk.RAISED, bd=0)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=0)
+        
+        # Верхняя часть правой панели - нейросетевой анализ
+        nn_frame = tk.Frame(right_panel, bg='#34495e')
+        nn_frame.pack(fill=tk.X, pady=(8, 5), padx=5)
+        
+        self.create_nn_results_panel(nn_frame)
+        
+        # Нижняя часть правой панели - классический анализ (с прокруткой)
+        classic_container = tk.Frame(right_panel, bg='#34495e')
+        classic_container.pack(fill=tk.BOTH, expand=True, pady=(2, 4), padx=5)
+        
+        # Создаем canvas с прокруткой для классического анализа
+        classic_canvas = tk.Canvas(classic_container, bg='#34495e', highlightthickness=0)
+        classic_scrollbar = tk.Scrollbar(classic_container, orient=tk.VERTICAL, command=classic_canvas.yview)
+        classic_scrollable_frame = tk.Frame(classic_canvas, bg='#34495e')
+        
+        classic_scrollable_frame.bind(
+            "<Configure>",
+            lambda e: classic_canvas.configure(scrollregion=classic_canvas.bbox("all"))
+        )
+        
+        classic_canvas.create_window((0, 0), window=classic_scrollable_frame, anchor="nw")
+        classic_canvas.configure(yscrollcommand=classic_scrollbar.set)
+        
+        classic_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        classic_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        
+        # Создаем панель классического анализа внутри скролл-фрейма
+        self.create_classic_analysis_panel(classic_scrollable_frame)
+        
+        # Нижняя панель - статус
+        self.status_bar = tk.Label(
+            main_frame,
+            text="Готов к работе",
+            font=('Arial', 10),
+            bg='#2c3e50',
+            fg='#95a5a6',
+            anchor='w'
+        )
+        self.status_bar.pack(fill=tk.X, pady=(10, 0))
+
+    def create_nn_results_panel(self, parent):
+        """Создание панели для результатов нейросети"""
+        
+        # Заголовок
+        tk.Label(
+            parent,
+            text="🤖 Нейросетевой анализ",
+            font=('Arial', 14, 'bold'),
+            bg='#34495e',
+            fg='#3498db'
+        ).pack(pady=10)
+        
+        # Результаты классификации
+        self.class_result_label = tk.Label(
+            parent,
+            text="",
+            font=('Arial', 14, 'bold'),
+            bg='#34495e',
+            fg='#f1c40f'
+        )
+        self.class_result_label.pack(pady=(0, 10))
+        
+        # Схема и баланс
+        info_frame = tk.Frame(parent, bg='#34495e')
+        info_frame.pack(fill=tk.X, pady=5, padx=15)
+        
+        self.scheme_label = tk.Label(
+            info_frame,
+            text="Тип схемы: -",
+            font=('Arial', 12),
+            bg='#34495e',
+            fg='white'
+        )
+        self.scheme_label.pack(anchor='w', pady=2)
+        
+        self.balance_class_label = tk.Label(
+            info_frame,
+            text="Класс баланса: -",
+            font=('Arial', 12),
+            bg='#34495e',
+            fg='white'
+        )
+        self.balance_class_label.pack(anchor='w', pady=2)
+        
+        self.balance_score_label = tk.Label(
+            info_frame,
+            text="Оценка гармонии: -",
+            font=('Arial', 12),
+            bg='#34495e',
+            fg='white'
+        )
+        self.balance_score_label.pack(anchor='w', pady=2)
+        
+        # Прогресс-бар
+        self.progress = ttk.Progressbar(parent, mode='indeterminate', length=100)
+    
+    def create_classic_analysis_panel(self, parent):
+        """Создание панели для классического анализа гармонии"""
+        
+        # Заголовок
+        tk.Label(
+            parent,
+            text="🎨 Классический анализ",
+            font=('Arial', 12, 'bold'),
+            bg='#34495e',
+            fg='#e74c3c'
+        ).pack(anchor='w', pady=(0, 5))
+        
+        # Контейнер для информации о гармонии
+        harmony_container = tk.Frame(parent, bg='#34495e')
+        harmony_container.pack(fill=tk.X, pady=2)
+        
+        self.harmony_info_label = tk.Label(
+            harmony_container,
+            text="",
+            font=('Arial', 10),
+            bg='#34495e',
+            fg='#95a5a6'
+        )
+        self.harmony_info_label.pack(anchor='w')
+        
+        
+        # Статистика насыщенности (отдельная строка)
+        self.saturation_label = tk.Label(
+            parent,
+            text="",
+            font=('Arial', 10),
+            bg='#34495e',
+            fg='#95a5a6',
+            anchor='w'
+        )
+        self.saturation_label.pack(anchor='w', pady=2, padx=15)
+        
+        # Статистика яркости (отдельная строка, под насыщенностью)
+        self.brightness_label = tk.Label(
+            parent,
+            text="",
+            font=('Arial', 10),
+            bg='#34495e',
+            fg='#95a5a6',
+            anchor='w'
+        )
+        self.brightness_label.pack(anchor='w', pady=2, padx=15)
+        
+        # Цветовой круг
+        self.wheel_figure = Figure(figsize=(4, 4), dpi=80, facecolor='#34495e')
+        self.wheel_canvas = FigureCanvasTkAgg(self.wheel_figure, master=parent)
+        self.wheel_canvas.get_tk_widget().pack(pady=5)
+        
+        # График доминантных цветов
+        self.colors_figure = Figure(figsize=(5, 5), dpi=80, facecolor='#34495e')
+        self.colors_canvas = FigureCanvasTkAgg(self.colors_figure, master=parent)
+        self.colors_canvas.get_tk_widget().pack(pady=5)
+
+    
+    
+    
+    def load_image(self):
+        """Загрузка изображения"""
+        file_path = filedialog.askopenfilename(
+            title="Выберите изображение",
+            filetypes=[
+                ("Изображения", "*.jpg *.jpeg *.png *"),
+                ("Все файлы", "*.*")
+            ]
+        )
+        
+        if file_path:
+            self.current_image_path = file_path
+            
+            # Отображение изображения
+            img = Image.open(file_path)
+            self.current_image_original = img.copy()
+            
+            # Получаем размеры левой панели для масштабирования
+            self.root.update_idletasks()  # Обновляем layout
+            left_panel_width = self.image_label.winfo_width()
+            left_panel_height = self.image_label.winfo_height()
+            
+            # Если панель еще не отрисована, используем разумные значения
+            if left_panel_width < 100 or left_panel_height < 100:
+                left_panel_width = 600
+                left_panel_height = 700
+            
+            # Масштабируем изображение, сохраняя пропорции
+            img.thumbnail((left_panel_width - 20, left_panel_height - 20), Image.Resampling.LANCZOS)
+            
+            self.photo = ImageTk.PhotoImage(img)
+            self.image_label.config(image=self.photo, text="")
+            self.image_label.image = self.photo
+            
+            # Сохраняем для анализа
+            self.current_image = img
+            
+            self.analyze_btn.config(state='normal')
+            self.status_bar.config(text=f"Загружено: {os.path.basename(file_path)}")
+                
+            # Отображение изображения
+    
+    # ============= КЛАССИЧЕСКИЕ МЕТОДЫ АНАЛИЗА  =============
+    
+    def get_colors_on_wheel(self, colors_arr):
+        """Определение позиций цветов на 12-секторном цветовом круге"""
+        if len(colors_arr) == 0:
+            return [0]*12
+        
+        from matplotlib.colors import rgb_to_hsv
+        hsv_colors = rgb_to_hsv(colors_arr / 255.0)
+        hues = hsv_colors[:, 0]
+        wheel = [0] * 12
+        
+        for hue in hues:
+            sector = int(hue * 12) % 12
+            wheel[sector] = 1
+        
+        # Обработка красного цвета (сектор 0, hue близкий к 1)
+        for hue in hues:
+            if hue > 0.96:
+                wheel[0] = 1
+        
+        return wheel
+    
+    def check_harmony_rules(self, wheel):
+        """Проверка типов цветовой гармонии по правилам"""
+        return {
+            'Монохромная': sum(wheel) == 1,
+            'Комплементарная': self._has_complementary(wheel),
+            'Сплит-комплементарная': self._has_split_complementary(wheel),
+            'Триадная': self._has_triadic(wheel),
+            'Аналоговая': self._has_analogous(wheel)
+        }
+    
+    def _has_complementary(self, wheel):
+        for i in range(12):
+            if wheel[i] == 1 and wheel[(i + 6) % 12] == 1:
+                return True
+        return False
+    
+    def _has_analogous(self, wheel):
+        for i in range(12):
+            if wheel[i] == 1 and wheel[(i + 1) % 12] == 1:
+                return True
+        return False
+    
+    def _has_triadic(self, wheel):
+        for i in range(12):
+            if wheel[i] == 1 and wheel[(i + 4) % 12] == 1 and wheel[(i + 8) % 12] == 1:
+                return True
+        return False
+    
+    def _has_split_complementary(self, wheel):
+        for i in range(12):
+            if wheel[i] == 1 and wheel[(i + 5) % 12] == 1 and wheel[(i + 7) % 12] == 1:
+                return True
+        return False
+    
+    def analyze_saturation_brightness(self, image):
+        """Анализ насыщенности и яркости изображения"""
+        from matplotlib.colors import rgb_to_hsv
+        
+        img_array = np.array(image)
+        hsv = rgb_to_hsv(img_array / 255.0)
+        
+        saturation = hsv[:, :, 1]
+        value = hsv[:, :, 2]
+        chroma = saturation * value
+        
+        return {
+            'avg_saturation': np.mean(saturation),
+            'avg_brightness': np.mean(value),
+            'saturation_std': np.std(saturation),
+            'brightness_std': np.std(value),
+            'low_saturation_ratio': np.mean(saturation < 0.2),
+            'high_saturation_ratio': np.mean(saturation > 0.8),
+            'avg_chroma': np.mean(chroma)
+        }
+    
+    def extract_dominant_colors(self, image, n_colors=5):
+        """Извлечение доминантных цветов через K-means"""
+        img_resized = image.resize((280, 280))
+        img_array = np.array(img_resized)
+        pixels = img_array.reshape(-1, 3)
+        
+        kmeans = KMeans(n_clusters=n_colors, random_state=42, n_init=10)
+        kmeans.fit(pixels)
+        
+        colors = kmeans.cluster_centers_.astype(int)
+        percentages = np.bincount(kmeans.labels_) / len(pixels)
+        
+        # Сортировка по частоте
+        sorted_idx = np.argsort(percentages)[::-1]
+        colors = colors[sorted_idx]
+        percentages = percentages[sorted_idx]
+        
+        return colors, percentages
+    
+    # ============= ВИЗУАЛИЗАЦИЯ =============
+    
+    def get_colors_on_wheel(self, colors_arr):
+        """Определение позиций цветов на 12-секторном цветовом круге"""
+        if len(colors_arr) == 0:
+            return [0]*12
+        
+        from matplotlib.colors import rgb_to_hsv
+        hsv_colors = rgb_to_hsv(colors_arr / 255.0)
+        hues = hsv_colors[:, 0]
+        wheel = [0] * 12
+        
+        print("=== ОПРЕДЕЛЕНИЕ СЕКТОРОВ ===")
+        for i, hue in enumerate(hues):
+            sector = int(hue * 12) % 12
+            print(f"Цвет {i+1}: RGB={colors_arr[i]}, Hue={hue:.3f}, Сектор={sector}")
+            wheel[sector] = 1
+        
+        # Обработка красного цвета (сектор 0, hue близкий к 1)
+        for i, hue in enumerate(hues):
+            if hue > 0.96:
+                print(f"Красный оттенок: Hue={hue:.3f} -> Сектор 0")
+                wheel[0] = 1
+        
+        print(f"Активные сектора: {[i for i, v in enumerate(wheel) if v]}")
+        return wheel
+
+    def draw_color_wheel(self, wheel):
+        """Рисование цветового круга с подсветкой активных секторов"""
+        try:
+            self.wheel_figure.clear()
+            ax = self.wheel_figure.add_subplot(111)
+            
+            # 24 цвета для плавного перехода, берем каждый второй для 12 секторов
+            wheel_colors = [
+                '#FF0000',  # 0 - Красный
+                '#FF8000',  # 1 - Оранжевый
+                '#FFFF00',  # 2 - Желтый
+                '#80FF00',  # 3 - Желто-зеленый
+                '#00FF00',  # 4 - Зеленый
+                '#00FF80',  # 5 - Зелено-голубой
+                '#00FFFF',  # 6 - Голубой
+                '#0080FF',  # 7 - Синий
+                '#0000FF',  # 8 - Синий
+                '#8000FF',  # 9 - Фиолетовый
+                '#FF00FF',  # 10 - Пурпурный
+                '#FF0080'   # 11 - Розовый
+            ]
+                 
+            # Короткие названия цветов для подписей (чтобы не налезали)
+            color_names = [
+                'К', 'О', 'Ж', 'Ж-З',
+                'З', 'З-Г', 'Г', 'С',
+                'С-ф', 'Ф', 'П', 'Р'
+            ]
+            # Полные названия для отладки
+            color_names_full = [
+                'Красный', 'Оранжевый', 'Желтый', 'Желто-зеленый',
+                'Зеленый', 'Зелено-голубой', 'Голубой', 'Синий',
+                'Синий', 'Фиолетовый', 'Пурпурный', 'Розовый'
+            ]
+        
+                # Создаем круговую диаграмму - правильно распаковываем
+            result = ax.pie(
+                [1] * 12,
+                colors=wheel_colors,
+                startangle=90,
+                wedgeprops={'edgecolor': 'white', 'linewidth': 1.5}
+            )
+
+            wedges = result[0]
+
+                # Сначала применяем прозрачность ко всем секторам
+            for i, wedge in enumerate(wedges):
+                if i < len(wheel) and wheel[i] == 1:
+                    wedge.set_alpha(1.0)
+                else:
+                    wedge.set_alpha(0.35)
+            
+            # Затем добавляем подписи (чтобы они были поверх)
+            for i, wedge in enumerate(wedges):
+                # Получаем углы сектора
+                ang1 = wedge.theta1
+                ang2 = wedge.theta2
+                # Средний угол
+                angle = (ang1 + ang2) / 2
+                # Позиция для текста (на 0.7 радиуса от центра)
+                x = 0.7 * np.cos(np.radians(angle))
+                y = 0.7 * np.sin(np.radians(angle))
+                
+                # Текст: номер сектора + название цвета
+                text = f"{i}\n{color_names[i]}"
+                
+                # Добавляем текст
+                ax.text(x, y, text, 
+                    ha='center', va='center',
+                    fontsize=8, color='white', fontweight='bold')
+               # Жирный шрифт для лучшей видимости
+                 #ax.text(x, y, color_names[i], 
+                  #   ha='center', va='center',
+                  #   fontsize=9, color='white', fontweight='bold',
+                  #   rotation=rotation, rotation_mode='anchor',
+                   #  bbox=dict(boxstyle='round,pad=0.2', facecolor='#2c3e50', alpha=0.7))
+                
+            # Подсветка активных секторов
+            print(f"=== ОТРИСОВКА КРУГА ===")
+            print(f"Активные сектора: {[i for i, v in enumerate(wheel) if v == 1]}")
+            
+            for i, wedge in enumerate(wedges):
+                if i < len(wheel) and wheel[i] == 1:
+                    wedge.set_edgecolor("#000000")  #  обводка
+                    wedge.set_linewidth(4)
+            
+                    wedge.set_zorder(10)  # Поднимаем на передний план
+                    print(f"✅ Сектор {i} ПОДСВЕЧЕН")
+                else:
+                    wedge.set_alpha(0.35)
+
+            ax.set_title('Цветовой круг\n(подсвечены доминантные цвета)', 
+                     color='white', fontsize=11, pad=10, fontweight='bold' )
+            ax.axis('equal')        
+                
+            #размер фигуры
+            self.wheel_figure.set_size_inches(4.5, 4.5)
+            self.wheel_figure.tight_layout()
+            self.wheel_canvas.draw()
+            
+            # Обновляем виджет
+            widget = self.wheel_canvas.get_tk_widget()
+            widget.update()
+            widget.update_idletasks()
+            
+        except Exception as e:
+            print(f"Ошибка отрисовки цветового круга: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def draw_dominant_colors(self, colors, percentages):
+        """Визуализация доминантных цветов"""
+        self.colors_figure.clear()
+        ax = self.colors_figure.add_subplot(111)
+        
+        for i, (color, pct) in enumerate(zip(colors[:5], percentages[:5])):
+            color_rgb = [c / 255 for c in color]
+            ax.barh(i, pct * 100, color=color_rgb, edgecolor='white', height=0.6)
+            ax.text(pct * 100 + 1, i, f'{pct * 100:.1f}%', 
+                    va='center', fontsize=18, color='white', fontweight='bold')
+        
+        ax.set_yticks(range(5))
+        ax.set_yticklabels([f'Цвет.{i+1}' for i in range(5)], fontsize=21)
+        ax.set_xlabel('Доля в изображении (%)', color='white', fontsize=16)
+        ax.set_title('Доминантные цвета', color='white', fontsize=17)
+        ax.set_xlim(0, 100)
+        ax.invert_yaxis()
+        
+        # Настройка внешнего вида
+        ax.set_facecolor('#34495e')
+        ax.tick_params(colors='white', labelsize=10)
+        for spine in ax.spines.values():
+            spine.set_color('white')
+        ax.xaxis.label.set_color('white')
+
+        # Компактное расположение
+        plt.subplots_adjust(left=0.2, right=0.92, top=0.92, bottom=0.1)
+        
+        self.colors_canvas.draw()
+    
+    # ============= ОСНОВНОЙ АНАЛИЗ =============
+    
+    def analyze_image(self):
+        """Запуск анализа изображения"""
+        thread = threading.Thread(target=self._run_analysis)
+        thread.start()
+        
+        self.progress.pack(pady=10)
+        self.progress.start()
+        self.analyze_btn.config(state='disabled')
+        self.load_btn.config(state='disabled')
+    
+    def _run_analysis(self):
+        """Выполнение анализа (нейросеть + классические методы)"""
+        try:
+            # ===== 1. НЕЙРОСЕТЕВОЙ АНАЛИЗ =====
+            img = self.current_image_original.resize((224, 224))
+            img_array = img_to_array(img) / 255.0
+            img_batch = np.expand_dims(img_array, axis=0)
+            
+            predictions = self.model.predict(img_batch, verbose=0)
+            
+            # Интерпретация результатов нейросети
+            scheme_idx = np.argmax(predictions['scheme_type'][0])
+            scheme_type = "Смешанная (colormix)" if scheme_idx == 1 else "Монохромная (monochromatic)"
+            scheme_conf = predictions['scheme_type'][0][scheme_idx]
+            
+            color_idx = np.argmax(predictions['color_class'][0])
+            color_class = self.color_encoder.classes_[color_idx]
+            color_conf = predictions['color_class'][0][color_idx]
+            
+            balance_score_val = predictions['balance_score'][0][0] * 10
+            balance_class_idx = np.argmax(predictions['balance_class'][0])
+            balance_class = self.balance_encoder.classes_[balance_class_idx]
+            balance_conf = predictions['balance_class'][0][balance_class_idx]
+            
+            self.analysis_result = {
+                'scheme_type': scheme_type,
+                'scheme_confidence': scheme_conf,
+                'color_class': color_class,
+                'color_confidence': color_conf,
+                'balance_score': balance_score_val,
+                'balance_class': balance_class,
+                'balance_confidence': balance_conf
+            }
+            
+            # ===== 2. КЛАССИЧЕСКИЙ АНАЛИЗ =====
+            # Извлечение доминантных цветов
+            colors, percentages = self.extract_dominant_colors(self.current_image_original)
+            
+            # Анализ по цветовому кругу
+            wheel = self.get_colors_on_wheel(colors)
+            harmony_types = self.check_harmony_rules(wheel)
+            
+            # Анализ насыщенности/яркости
+            sat_stats = self.analyze_saturation_brightness(self.current_image_original)
+            
+            # ===== ОБНОВЛЕНИЕ GUI =====
+            self.root.after(0, lambda: self.update_nn_results(self.analysis_result))
+            self.root.after(0, lambda: self.update_classic_results(wheel, harmony_types, sat_stats))
+            self.root.after(0, lambda: self.draw_color_wheel(wheel))
+            self.root.after(0, lambda: self.draw_dominant_colors(colors, percentages))
+            
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror("Ошибка", f"Ошибка анализа:\n{e}"))
+        finally:
+            self.root.after(0, self.stop_progress)
+    
+    def update_nn_results(self, res):
+        """Обновление результатов нейросети"""
+        if not res:
+            return
+        
+        def get_color(conf):
+            if conf > 0.8:
+                return '#2ecc71'
+            elif conf > 0.6:
+                return '#f39c12'
+            return '#e74c3c'
+        
+        self.class_result_label.config(
+            text=f"🎨 {res['color_class'].replace('_', ' ').upper()}",
+            fg=get_color(res['color_confidence'])
+        )
+        
+        self.scheme_label.config(
+            text=f"📐 Тип схемы: {res['scheme_type']} ({res['scheme_confidence']:.1%})"
+        )
+        
+        balance_colors = {
+            'unbalanced': '#e74c3c',
+            'balanced': '#2ecc71',
+            'over_saturated': '#f39c12'
+        }
+        balance_color = balance_colors.get(res['balance_class'], 'white')
+        
+        self.balance_class_label.config(
+            text=f"⚖️ Класс баланса: {res['balance_class']} ({res['balance_confidence']:.1%})",
+            fg=balance_color
+        )
+        
+        score = res['balance_score']
+        score_color = '#2ecc71' if score >= 7 else '#f39c12' if score >= 4 else '#e74c3c'
+        
+        self.balance_score_label.config(
+            text=f"⭐ ⋰˚★ ⋰˚✩ Оценка гармонии: {score:.1f} / 10",
+            fg=score_color
+        )
+    def update_classic_results(self, wheel, harmony_types, sat_stats):
+        """Обновление результатов классического анализа"""
+        # Получаем контейнер для гармонии
+        harmony_container = self.harmony_info_label.master
+        # Очищаем ВСЕ виджеты в контейнере
+        for widget in harmony_container.winfo_children():
+            widget.destroy()
+            
+        # Типы гармонии
+        active_harmonies = [name for name, active in harmony_types.items() if active]
+        
+        if active_harmonies:
+            # Заголовок
+            title_label = tk.Label(
+                harmony_container,
+                text="✓ Найдены типы гармонии:",
+                font=('Arial', 11),
+                bg='#34495e',
+                fg='#95a5a6'
+            )
+            title_label.pack(anchor='w', pady=(0, 5))
+            
+            # Контейнер для кнопок-типов гармонии
+            buttons_frame = tk.Frame(harmony_container, bg='#34495e')
+            buttons_frame.pack(anchor='w', pady=(0, 10))
+            
+            # Словарь с описаниями типов гармонии
+            harmony_descriptions = {
+                'Монохромная': {
+                    'title': '🎨 Монохромная гармония',
+                    'desc': 'Используются оттенки одного цвета.\nСоздает спокойное, элегантное впечатление.\nЧасто используется в минималистичном дизайне.'
+                },
+                'Комплементарная': {
+                    'title': '🎨 Комплементарная гармония',
+                    'desc': 'Противоположные цвета на цветовом круге.\nСоздает яркий, динамичный контраст.\nТребует осторожности в пропорциях.'
+                },
+                'Сплит-комплементарная': {
+                    'title': '🎨 Сплит-комплементарная гармония',
+                    'desc': 'Цвет + два соседних с противоположным.\nМягче классической комплементарной.\nДает больше вариативности.'
+                },
+                'Триадная': {
+                    'title': '🎨 Триадная гармония',
+                    'desc': 'Три равноудаленных цвета на круге.\nСоздает сбалансированную, живую палитру.\nПопулярна в современном дизайне.'
+                },
+                'Аналоговая': {
+                    'title': '🎨 Аналоговая гармония',
+                    'desc': 'Соседние цвета на цветовом круге.\nСоздает гармоничные, спокойные сочетания.\nИдеально для природных тем.'
+                }
+            }
+            
+            # Создаем кнопки для каждого типа гармонии
+            for h_type in active_harmonies:
+                desc = harmony_descriptions.get(h_type, {
+                    'title': f'🎨 {h_type}',
+                    'desc': f'Тип цветовой гармонии,\nоснованный на правилах\nцветового круга.'
+                })
+                
+                btn = tk.Button(
+                    buttons_frame,
+                    text=f"  {h_type}  ",
+                    font=('Arial', 10, 'bold'),
+                    bg='#2c3e50',
+                    fg='#f1c40f',
+                    relief=tk.GROOVE,
+                    cursor='hand2',
+                    command=lambda t=h_type, d=desc: self.show_harmony_explanation(t, d)
+                )
+                btn.pack(side=tk.LEFT, padx=5, pady=2)
+        
+        else:
+            # Если нет активных гармоний - показываем сообщение
+            no_harmony_label = tk.Label(
+                harmony_container,
+                text="⚠️ Явные типы гармонии не обнаружены",
+                font=('Arial', 10),
+                bg='#34495e',
+                fg='#e74c3c'
+            )
+            no_harmony_label.pack(anchor='w', pady=5)
+
+        # Статистика насыщенности
+        sat_text = f"📊 Насыщенность: {sat_stats['avg_saturation']:.2f} "
+        sat_text += f"(низкая: {sat_stats['low_saturation_ratio']:.0%}, "
+        sat_text += f"высокая: {sat_stats['high_saturation_ratio']:.0%})"
+        self.saturation_label.config(text=sat_text)
+        
+        # Статистика яркости
+        bright_text = f"💡 Яркость: {sat_stats['avg_brightness']:.2f} "
+        bright_text += f"(хрома: {sat_stats['avg_chroma']:.2f})"
+        self.brightness_label.config(text=bright_text)
+        
+        # Дополнительная информация о цветах на круге
+        active_sectors = [i for i, v in enumerate(wheel) if v]
+        if active_sectors:
+            sector_text = f"🎯 Активные сектора круга: {active_sectors}"
+            # Создаем метку для секторов, если её нет
+            if not hasattr(self, '_sector_label'):
+                self._sector_label = tk.Label(
+                    harmony_container,
+                    font=('Arial', 9),
+                    bg='#34495e',
+                    fg='#7f8c8d'
+                )
+                self._sector_label.pack(anchor='w', pady=2)
+            self._sector_label.config(text=sector_text)
+
+    def show_harmony_explanation(self, harmony_type, description):
+        """Показать окно с объяснением типа гармонии"""
+        
+        # Создание всплывающего окна
+        popup = tk.Toplevel(self.root)
+        popup.title(f"О гармонии: {harmony_type}")
+        popup.geometry("450x280")
+        popup.configure(bg='#34495e')
+        popup.transient(self.root)
+        popup.grab_set()
+            
+        # Центрирование окна относительно главного
+        popup.update_idletasks()
+        x = self.root.winfo_x() + (self.root.winfo_width() // 2) - 225
+        y = self.root.winfo_y() + (self.root.winfo_height() // 2) - 140
+        popup.geometry(f"+{x}+{y}")
+            
+        # Заголовок
+        title_label = tk.Label(
+        popup,
+            text=description['title'],
+            font=('Arial', 14, 'bold'),
+            bg='#34495e',
+            fg='#f1c40f'
+        )
+        title_label.pack(pady=(15, 10))
+            
+        # Текст пояснения
+        text_widget = tk.Text(
+            popup,
+            wrap=tk.WORD,
+            bg='#34495e',
+            fg='white',
+            font=('Arial', 11),
+            padx=15,
+            pady=15,
+            relief=tk.FLAT,
+            borderwidth=0
+        )
+        text_widget.insert(tk.END, description['desc'])
+        text_widget.config(state=tk.DISABLED)
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 15))
+        
+        # Кнопка закрытия
+        close_btn = tk.Button(
+            popup,
+            text="Закрыть",
+            command=popup.destroy,
+            bg='#2980b9',
+            fg='white',
+            font=('Arial', 10),
+            padx=20,
+            pady=5,
+            cursor='hand2'
+        )
+        close_btn.pack(pady=(0, 15))
+    
+    def stop_progress(self):
+        """Остановка индикатора прогресса"""
+        self.progress.stop()
+        self.progress.pack_forget()
+        self.analyze_btn.config(state='normal')
+        self.load_btn.config(state='normal')
+
+
+    
+
+
+# Запуск приложения
+if __name__ == "__main__":
+    root = tk.Tk()
+    app = ColorHarmonyApp(root)
+    root.mainloop()
